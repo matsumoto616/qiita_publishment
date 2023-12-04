@@ -22,6 +22,9 @@ https://qiita.com/matsumoto616/items/348e3703b63d1c731cd9
 
 https://qiita.com/matsumoto616/items/d30091274784a28eb872
 
+**次回（part3）の記事**
+（作成中）
+
 part2では線形ガウス型状態空間モデルに対するカルマンフィルタをPythonで実装してみる。今回は勉強のため（できる限り）スクラッチ実装するが、statsmodelsに実装されているものを使ってもよさそう。
 
 https://www.statsmodels.org/dev/statespace.html
@@ -548,7 +551,7 @@ R_t =
 ```
 
 ## ランダムウォークモデルの実装と考察
-欠損のないデータに対してランダムウォークモデルを使ったフィルタ・平滑化・予測を試してみる。お試しなので、ハイパーパラメータの$\mu_0, V_0, \tau^2, \sigma^2$は適当に決めた。
+欠損のないデータに対してランダムウォークモデルを使ったフィルタ・予測を試してみる。お試しなので、ハイパーパラメータの$\mu_0, V_0, \tau^2, \sigma^2$は適当に決めた。
 ```python
 # ランダムウォークモデル
 # データの長さ
@@ -650,7 +653,7 @@ fig.show()
 
 学習期間の部分だけ見るときれいにフィッティングしているようにも見えるが、実際は観測値をただなぞっているだけである。状態は一定としているため、予測値は学習期間の最終状態のまま推移する。
 
-![ランダムウォークモデル1](statespace_part1_fig/image.png)
+![ランダムウォークモデル1](./statespace_part2_fig/image.png)
 
 次はシステムノイズの分散を$10^{-3}$に変えて計算してみる。
 ```python
@@ -663,7 +666,7 @@ filter_result = model.kalman_filter()
 predictor_result = model.kalman_predictor(Fp, Gp, Hp, Qp, Rp)
 ```
 
-![ランダムウォークモデル2](statespace_part1_fig/image-1.png)
+![ランダムウォークモデル2](./statespace_part2_fig/image-1.png)
 
 システムノイズ<観測ノイズとすると、カルマンフィルタは観測値より状態モデルを信用する。そのため、状態モデル（状態＝一定）を強く反映した結果が得られた。実は、トレンドモデルの推定値を決定するのはシステムノイズと観測ノイズの分散比$\lambda=\tau^2/\sigma^2$であり、トレードオフパラメータと呼ばれる。
 
@@ -748,12 +751,12 @@ Q_t^{(t)} & \\
 \quad
 Q_t^{(t)} = 
 \begin{bmatrix}
-{\tau^{(t)}}^2
+{\tau^{2}}^{(t)}
 \end{bmatrix},
 \quad
 Q_t^{(s)} = 
 \begin{bmatrix}
-{\tau^{(s)}}^2
+{\tau^{2}}^{(s)}
 \end{bmatrix}, \tag{18}\\
 R_t &= 
 \begin{bmatrix}
@@ -763,8 +766,367 @@ R_t &=
 ```
 
 ## 季節調整モデルの実装と考察
-（作成中）
+欠損のないデータに対して季節調整モデルを使ったフィルタ・予測を実装してみた。今回も、ハイパーパラメータの$\mu_0, V_0, {\tau^{2}}^{(t)}, {\tau^{2}}^{(s)}, \sigma^2$は適当に決めた。
+
+```python
+# 季節調整モデル
+# 補助関数
+def make_diag_stack_matrix(matrix_list):
+    """
+    行列のリストから対角方向に結合した行列を作成する
+    """
+    dim_i = sum([m.shape[0] for m in matrix_list])
+    dim_j = sum([m.shape[1] for m in matrix_list])
+    block_diag = np.zeros((dim_i, dim_j))
+
+    pos_i = pos_j = 0
+    for m in matrix_list:
+        for i in range(m.shape[0]):
+            for j in range(m.shape[1]):
+                block_diag[pos_i+i, pos_j+j] = m[i, j]
+        pos_i += m.shape[0]
+        pos_j += m.shape[1]
+
+    return block_diag
+
+def make_hstack_matrix(matrix_list):
+    """
+    行列のリストから横方向に結合した行列を作成する
+    """
+    return np.concatenate(matrix_list, 1)
+
+# 状態方程式の行列
+F0_trend = np.array(
+    [[1]]
+)
+F0_seasonal = np.array(
+    [[-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+     [ 1,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0],
+     [ 0,  1,  0,  0,  0,  0,  0,  0,  0,  0,  0],
+     [ 0,  0,  1,  0,  0,  0,  0,  0,  0,  0,  0],
+     [ 0,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0],
+     [ 0,  0,  0,  0,  1,  0,  0,  0,  0,  0,  0],
+     [ 0,  0,  0,  0,  0,  1,  0,  0,  0,  0,  0],
+     [ 0,  0,  0,  0,  0,  0,  1,  0,  0,  0,  0],
+     [ 0,  0,  0,  0,  0,  0,  0,  1,  0,  0,  0],
+     [ 0,  0,  0,  0,  0,  0,  0,  0,  1,  0,  0],
+     [ 0,  0,  0,  0,  0,  0,  0,  0,  0,  1,  0]]
+)
+F0 = make_diag_stack_matrix([F0_trend, F0_seasonal])
+
+# システムノイズの行列
+G0_trend = np.array(
+    [[1]]
+)
+G0_seasonal = np.array(
+    [[1],
+     [0],
+     [0],
+     [0],
+     [0],
+     [0],
+     [0],
+     [0],
+     [0],
+     [0],
+     [0]]
+)
+G0 = make_diag_stack_matrix([G0_trend, G0_seasonal])
+
+# 観測方程式の行列
+H0_trend = np.array([[1]])
+H0_seasonal = np.array([[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]])
+H0 = make_hstack_matrix([H0_trend, H0_seasonal])
+
+# システムノイズの分散共分散行列
+Q0_trend = np.array([[1]])
+Q0_seasonal = np.array([[1]])
+Q0 = make_diag_stack_matrix([Q0_trend, Q0_seasonal])
+
+# 観測ノイズの分散共分散行列
+R0 = np.array([[1]])
+
+# スタック
+F = stack_matrix(F0, T)
+G = stack_matrix(G0, T)
+H = stack_matrix(H0, T)
+Q = stack_matrix(Q0, T)
+R = stack_matrix(R0, T)
+
+# 初期状態（データの平均・分散で適当に決定）
+mu0 = np.array([[df["Temperature"].mean() for i in range(F0.shape[0])]]).T
+V0 = np.eye(F0.shape[0]) * df["Temperature"].var()
+
+# 観測値（T×1×1行列とすることに注意）
+y = np.expand_dims(df["Temperature"].values, (1, 2))
+
+# モデル作成
+model = LinearGaussianStateSpaceModel(mu0, V0, F, G, H, Q, R, y)
+
+# カルマンフィルタ
+filter_result = model.kalman_filter()
+
+# 長期予測
+horizon = 12*5
+pred_index = pd.date_range(start=df.index[-1], periods=horizon+1, freq="MS")[1:]
+Fp = stack_matrix(F0, horizon)
+Gp = stack_matrix(G0, horizon)
+Hp = stack_matrix(H0, horizon)
+Qp = stack_matrix(Q0, horizon)
+Rp = stack_matrix(R0, horizon)
+predictor_result = model.kalman_predictor(Fp, Gp, Hp, Qp, Rp)
+
+# プロット
+config = {
+    "yaxis": {"min": None, "max": None},
+    "rows": 3,
+    "cols": 1,
+    "titles": [None, "trend", "seasonal"]
+}
+traces = {
+    "data": {
+        "x": df.index,
+        "y": df["Temperature"],
+        "color": "black",
+        "row": 1,
+        "col": 1,
+        "showlegend": True
+    },
+    "filter": {
+        "x": df.index,
+        "y": filter_result["nu_predicted"][:,0,0],
+        "color": "red",
+        "row": 1,
+        "col": 1,
+        "showlegend": True
+    },
+    "predict": {
+        "x": pred_index,
+        "y": predictor_result["nu_predicted"][:,0,0],
+        "color": "blue",
+        "row": 1,
+        "col": 1,
+        "showlegend": True
+    },
+    "filter_trend": {
+        "x": df.index,
+        "y": filter_result["mu_filtered"][:,0,0],
+        "color": "red",
+        "row": 2,
+        "col": 1,
+        "showlegend": True
+    },
+    "predict_trend": {
+        "x": pred_index,
+        "y": predictor_result["mu_predicted"][:,0,0],
+        "color": "blue",
+        "row": 2,
+        "col": 1,
+        "showlegend": True
+    },
+    "filter_seasonal": {
+        "x": df.index,
+        "y": filter_result["mu_filtered"][:,1,0],
+        "color": "red",
+        "row": 3,
+        "col": 1,
+        "showlegend": True
+    },
+    "predict_seasonal": {
+        "x": pred_index,
+        "y": predictor_result["mu_predicted"][:,1,0],
+        "color": "blue",
+        "row": 3,
+        "col": 1,
+        "showlegend": True
+    }
+}
+
+request = {"config": config, "traces": traces}
+fig = plot(request)
+fig.show()
+```
+![季節調整モデル1](./statespace_part2_fig/image-2.png)
+
+狙い通りにトレンド成分と周期成分へと分解できており、予測も悪くない結果となった。
+
+## 欠測データに対する平滑化の実装と考察
+季節調整モデルを使って欠測データの補間を試してみる。
+
+```python
+# 欠測値の補間
+# 欠測値のセット
+y = np.expand_dims(df["Temperature_missing"].values, (1, 2))
+model.set_params(y=y)
+
+# カルマンフィルタ実行（比較用）
+filter_result = model.kalman_filter()
+# 固定区間平滑化実行
+smoother_result = model.kalman_smoother()
+
+# プロット
+config = {
+    "yaxis": {"min": 15, "max": 35},
+    "rows": 3,
+    "cols": 1,
+    "titles": ["data", "filter", "smoother"]
+}
+traces = {
+    "missing_data": {
+        "x": df.index,
+        "y": df["Temperature_missing"],
+        "color": "black",
+        "row": 1,
+        "col": 1,
+        "showlegend": True
+    },
+    "filter": {
+        "x": df.index,
+        "y": filter_result["nu_predicted"][:,0,0],
+        "color": "red",
+        "row": 2,
+        "col": 1,
+        "showlegend": True
+    },
+    "filter_upper": {
+        "x": df.index,
+        "y": filter_result["nu_predicted"][:,0,0] \
+            + 2 * np.sqrt(filter_result["D_predicted"][:,0,0]),
+        "color": "pink",
+        "row": 2,
+        "col": 1,
+        "showlegend": True
+    },
+    "filter_lower": {
+        "x": df.index,
+        "y": filter_result["nu_predicted"][:,0,0] \
+            - 2 * np.sqrt(filter_result["D_predicted"][:,0,0]),
+        "color": "pink",
+        "row": 2,
+        "col": 1,
+        "showlegend": True
+    },
+    "smoother": {
+        "x": df.index,
+        "y": smoother_result["nu_predicted"][:,0,0],
+        "color": "blue",
+        "row": 3,
+        "col": 1,
+        "showlegend": True
+    },
+    "smoother_upper": {
+        "x": df.index,
+        "y": smoother_result["nu_predicted"][:,0,0] \
+            + 2 *np.sqrt(smoother_result["D_predicted"][:,0,0]),
+        "color": "skyblue",
+        "row": 3,
+        "col": 1,
+        "showlegend": True
+    },
+    "smoother_lower": {
+        "x": df.index,
+        "y": smoother_result["nu_predicted"][:,0,0] \
+            - 2 *np.sqrt(smoother_result["D_predicted"][:,0,0]),
+        "color": "skyblue",
+        "row": 3,
+        "col": 1,
+        "showlegend": True
+    },
+}
+
+request = {"config": config, "traces": traces}
+fig = plot(request)
+fig.show()
+```
+
+![欠測データ補間1](./statespace_part2_fig/image-3.png)
+
+赤線がカルマンフィルタによる補間、青線が固定区間平滑化による補間である。前者は欠測時刻より過去の情報をもとに補間しているのに対し、後者はデータが存在する全期間の情報を使っているため、固定区間平滑化のほうが滑らかな補間になっている。薄い赤/青で示した信頼区間（$\pm 2\sigma$）を見ると、平滑化は前後の情報を使うことで信頼区間の狭い予測ができていることが視覚的にわかる。
+
+## 最尤法によるパラメータ推定
+最後に、先ほどまでは適当な値としていたハイパーパラメータ$\mu_0, V_0, {\tau^{2}}^{(t)}, {\tau^{2}}^{(s)}, \sigma^2$の推定を試してみる。パラメータ数が多くなってしまうのを防ぐため、初期状態は$\mu_0=a\times[1, \cdots, 1]^T,\ V_0=bI$の形を仮定した。数値最適化にはscipyに実装されているL-BFGS-B法を用いた。
+
+```python
+# 目的関数（対数尤度×(-1)）
+def objective(params):
+    # 初期状態
+    mu0 = np.array([[params[0] for _ in range(F0.shape[0])]]).T
+    V0 = np.eye(F0.shape[0]) * params[1]
+
+    # システムノイズの分散共分散行列
+    Q0_trend = np.array([[params[2]]])
+    Q0_seasonal = np.array([[params[3]]])
+    Q0 = make_diag_stack_matrix([Q0_trend, Q0_seasonal])
+    Q = stack_matrix(Q0, T)
+    
+    # 観測ノイズの分散共分散行列
+    R0 = np.array([[params[4]]])
+    R = stack_matrix(R0, T)
+
+    # パラメータ更新
+    model.set_params(mu0=mu0, V0=V0, Q=Q, R=R)
+
+    # カルマンフィルタを実行
+    result = model.kalman_filter(calc_liklihood=True)
+
+    return -1 * result["logliklihood"] # llの最大化＝-llの最小化
+
+# パラメータ最適化
+from scipy.optimize import minimize
+
+# 初期値が悪いと収束しない（今後の課題）
+optimization_result = minimize(
+    fun=objective,
+    x0=[0, 1, 1, 1, 1],
+    bounds=[(None, None), (1e-5, None), (1e-5, None), (1e-5, None), (1e-5, None)], 
+    method="L-BFGS-B"
+)
+
+# 最適パラメータで計算
+params = optimization_result.x
+
+# 初期状態
+mu0 = np.array([[params[0] for _ in range(F0.shape[0])]]).T
+V0 = np.eye(F0.shape[0]) * params[1]
+
+# システムノイズの分散共分散行列
+Q0_trend = np.array([[params[2]]])
+Q0_seasonal = np.array([[params[3]]])
+Q0 = make_diag_stack_matrix([Q0_trend, Q0_seasonal])
+Q = stack_matrix(Q0, T)
+
+# 観測ノイズの分散共分散行列（1×1行列とすることに注意）
+R0 = np.array([[params[4]]])
+R = stack_matrix(R0, T)
+
+# パラメータ更新
+model.set_params(mu0=mu0, V0=V0, Q=Q, R=R)
+
+# カルマンフィルタを実行
+filter_result = model.kalman_filter(calc_liklihood=True)
+smoother_result = model.kalman_smoother()
+```
+
+![パラメータ推定](./statespace_part2_fig/image-4.png)
+
+先ほどの結果と比べて全体的に信頼区間が狭くなった。観測値があるところでは、期待値と信頼区間がほとんど重なってしまっている。平滑化における欠測値の補間はかなり良い感じに見える。
+
+なお、パラメータ推定結果は
+```math
+\begin{align}
+\mu_0 &= [0.68, \cdots, 0.68]^T, \\
+V_0 &= 5.00I, \\
+{\tau^{2}}^{(t)} &= 0.15, \\
+{\tau^{2}}^{(s)} &= 0.53, \\
+\sigma^2 &= 1.00\times 10^{-5},
+\end{align}
+```
+となっており、システムノイズに比べて観測ノイズがかなり小さく推定されている（観測ノイズはパラメータ探索範囲の下限値）。
+
+# まとめ
+本記事ではカルマンフィルタのpython実装とエルニーニョデータに対する試計算を行った。ランダムウォークモデルと季節調整モデルを実装し、フィルタや予測の様子を確認した。また、人工的に欠測させたデータを用意して、季節調整モデルで補間できることも確認した。最後に、対数尤度の最適化（最尤推定）によって、モデルのハイパーパラメータ推定も行い、最適化によってより優れた結果が得られることが分かった。次回以降は線形ガウス型の枠組みを外れて、非線形や非ガウス型の問題にチャレンジしてみる予定である。
 
 # 参考文献
+- 北川源四郎「Rによる時系列モデリング入門」
 
 [^1]: 周期$p$の周期性を表現した式として自然なのは$s_t\simeq s_{t-p}$であるが、このままでは上手くいかないことが知られている。この表現の季節周期成分は、トレンド成分モデル$t_t\simeq t_{t-1}$と共通の因子を持ち、分解の一意性が失われるからである。時間シフトオペレーター$B$を$Bs_t \equiv s_{t-1}$と定義する。これを用いると季節周期成分モデル$s_t\simeq s_{t-p}$は$(1-B^p)s_t \simeq0$、トレンド成分モデルは$(1-B)t_t\simeq0$となり、$(1-B^p)=(1-B)(1+B+\cdots +B^{p-1})$であるから確かに共通因子$(1-B)$が含まれることがわかる。式$(9)$はこの共通因子を取り除いた$(1+B+\cdots +B^{p-1})s_t\simeq 0$に相当する。
